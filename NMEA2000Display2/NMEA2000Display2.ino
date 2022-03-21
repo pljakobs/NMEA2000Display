@@ -1,15 +1,14 @@
 #include <Arduino.h>
-//#define N2k_SPI_CS_PIN 53    // Pin for SPI select for mcp_can
-//#define N2k_CAN_INT_PIN 21   // Interrupt pin for mcp_can
-//#define USE_MCP_CAN_CLOCK_SET 8  // Uncomment this, if your mcp_can shield has 8MHz chrystal
-//#define ESP32_CAN_TX_PIN GPIO_NUM_16 // Uncomment this and set right CAN TX pin definition, if you use ESP32 and do not have TX on default IO 16
-//#define ESP32_CAN_RX_PIN GPIO_NUM_17 // Uncomment this and set right CAN RX pin definition, if you use ESP32 and do not have RX on default IO 4
-//#define NMEA2000_ARDUINO_DUE_CAN_BUS tNMEA2000_due::CANDevice1    // Uncomment this, if you want to use CAN bus 1 instead of 0 for Arduino DUE
+#define ESP32_CAN_TX_PIN GPIO_NUM_16 // Uncomment this and set right CAN TX pin definition, if you use ESP32 and do not have TX on default IO 16
+#define ESP32_CAN_RX_PIN GPIO_NUM_17 // Uncomment this and set right CAN RX pin definition, if you use ESP32 and do not have RX on default IO 4
 #include <NMEA2000_CAN.h>
 #include <N2kMessages.h>
 #include <N2kMessagesEnumToStr.h>
 
 HardwareSerial Display(1);
+
+#define DEBUG 0
+int then;
 
 typedef struct {
   unsigned long PGN;
@@ -40,6 +39,9 @@ void Humidity(const tN2kMsg &N2kMsg);
 void Pressure(const tN2kMsg &N2kMsg);
 void UserDatumSettings(const tN2kMsg &N2kMsg);
 void GNSSSatsInView(const tN2kMsg &N2kMsg);
+void Wind(const tN2kMsg &N2kMsg);
+
+void nextionSetValue(String object, int val);
 
 tNMEA2000Handler NMEA2000Handlers[]={
   {126992L,&SystemTime},
@@ -57,10 +59,10 @@ tNMEA2000Handler NMEA2000Handlers[]={
   {128259L,&Speed},
   {128267L,&WaterDepth},
   {129026L,&COGSOG},
-  {129029L,&GNSS},
+  //{129029L,&GNSS},
   {129033L,&LocalOffset},
   {129045L,&UserDatumSettings},
-  {129540L,&GNSSSatsInView},
+  //{129540L,&GNSSSatsInView},
   {130310L,&OutsideEnvironmental},
   {130312L,&Temperature},
   {130313L,&Humidity},
@@ -75,37 +77,44 @@ Stream *OutputStream;
 void HandleNMEA2000Msg(const tN2kMsg &N2kMsg);
 
 void setup() {
-  Serial.begin(115200); delay(500);
-  OutputStream=&Serial;
 
-    // Set Product information
+  // Set Product information
   NMEA2000.SetProductInformation("00000002", // Manufacturer's Model serial code
                                  100, // Manufacturer's product code
                                  "MFDisplay",  // Manufacturer's Model ID
                                  "0.0.0.1 (2022-03-19)",  // Manufacturer's Software version code
-                                 "1.0.0.0 (2022-03-19)" // Manufacturer's Model version
+                                 "1.0.0.0 (2022-03-19)", // Manufacturer's Model version
+                                 0xff, //load equivalency
+                                 0xffff, //nmea2k version
+                                 0xff, // cert level
+                                 0  // internal device ID
                                  );
   // Set device information
   NMEA2000.SetDeviceInformation(1, // Unique number. Use e.g. Serial number.
                                 130, // Device function=Display. See codes on http://www.nmea.org/Assets/20120726%20nmea%202000%20class%20&%20function%20codes%20v%202.00.pdf
                                 120, // Device class=Display. See codes on  http://www.nmea.org/Assets/20120726%20nmea%202000%20class%20&%20function%20codes%20v%202.00.pdf
-                                2731 // Just choosen free from code list on http://www.nmea.org/Assets/20121020%20nmea%202000%20registration%20list.pdf                               
+                                2731, // Just choosen free from code list on http://www.nmea.org/Assets/20121020%20nmea%202000%20registration%20list.pdf                               
+                                4, //marine
+                                0 //internal device ID
                                );
-//   while (!Serial) 
+
+  Serial.begin(115200);
+  OutputStream=&Serial;
   Display.begin(115200, SERIAL_8N1, 35, 32); 
   while(!Display);
-  Serial.begin(115200);
+  
   while(Display.available()){
-    Serial.print(Display.read());
+    OutputStream->print(Display.read());
   }
-//  NMEA2000.SetN2kCANReceiveFrameBufSize(50);
+  //  NMEA2000.SetN2kCANReceiveFrameBufSize(50);
   // Do not forward bus messages at all
   NMEA2000.SetForwardType(tNMEA2000::fwdt_Text);
-  NMEA2000.SetForwardStream(OutputStream);
+  NMEA2000.SetMode(tNMEA2000::N2km_ListenAndNode,22);
+  // NMEA2000.SetForwardStream(OutputStream);
   // Set false below, if you do not want to see messages parsed to HEX withing library
-  NMEA2000.EnableForward(false);
+  NMEA2000.EnableForward(true);
   NMEA2000.SetMsgHandler(HandleNMEA2000Msg);
-//  NMEA2000.SetN2kCANMsgBufSize(2);
+  //  NMEA2000.SetN2kCANMsgBufSize(2);
   NMEA2000.Open();
   OutputStream->print("Running...");
 }
@@ -464,20 +473,23 @@ void WaterDepth(const tN2kMsg &N2kMsg) {
     }
 }
 
-
 void Wind(const tN2kMsg &N2kMsg) {
   unsigned char SID;
   double WindSpeed, WindAngle;
   tN2kWindReference WindReference;
-  if(ParseN2kPGN130306(N2kMsg,SID,WindSpeed,WindAngle,WindReference){
-    nextionSetValue("SpeedW",(int)(WindSpeed*10));
-    nextionSetValue("WindA", (int)WindAngle);
-  }
+  if(ParseN2kPGN130306(N2kMsg,SID,WindSpeed,WindAngle,WindReference)){
+    nextionSetValue("WindA", (int)RadToDeg(WindAngle));
+    nextionSetValue("SpeedW",(int)(msToKnots(WindSpeed)*10));
+    #if DEBUG == 1
+    OutputStream->println("===>Wind update<===");
+    OutputStream->printf("    Wrote WindSpeed %i\n          WindAngle %i\n",(int)msToKnots(WindSpeed),(int)RadToDeg(WindAngle));  
+    #endif
+    }
+    
 }
 
 //*****************************************************************************
-void printLLNumber(Stream *OutputStream, unsigned long long n, uint8_t base=10)
-{
+void printLLNumber(Stream *OutputStream, unsigned long long n, uint8_t base=10){
   unsigned char buf[16 * sizeof(long)]; // Assumes 8-bit chars.
   unsigned long long i = 0;
 
@@ -521,7 +533,7 @@ void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
   int iHandler;
   
   // Find handler
-  OutputStream->print("In Main Handler: "); OutputStream->println(N2kMsg.PGN);
+  //OutputStream->print("In Main Handler: "); OutputStream->println(N2kMsg.PGN);
   for (iHandler=0; NMEA2000Handlers[iHandler].PGN!=0 && !(N2kMsg.PGN==NMEA2000Handlers[iHandler].PGN); iHandler++);
   
   if (NMEA2000Handlers[iHandler].PGN!=0) {
@@ -533,15 +545,14 @@ void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
 
 void nextionSetValue(String object, int val){
   String cmd;
-  cmd=object+"="+String(val)M
+  cmd=object+"="+String(val);
   nextionSendCmd(cmd);
 }
 
-void nextionSendCmd(String cmd)
-{
+void nextionSendCmd(String cmd){
   Display.print(cmd);
   Display.write("\xFF\xFF\xFF");
-  #ifdef DEBUG
+  #if DEBUG == 1
     if(cmd.length() > 0)
     {
       Serial.print("Sending command : ");
@@ -556,4 +567,8 @@ void nextionSendCmd(String cmd)
 void loop() 
 { 
   NMEA2000.ParseMessages();
+  if (millis()-then>1000){
+    then=millis();
+    OutputStream->println("tick");
+    }
 }
